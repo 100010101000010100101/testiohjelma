@@ -1,0 +1,396 @@
+{
+  "version": 3,
+  "global_settings": {
+    "bootloader_path": "",
+    "partitions_path": "",
+    "app_path": "",
+    "flash_baudrate": "921600",
+    "serial_baudrate": "115200",
+    "modbus_baudrate": "9600",
+    "modbus_timeout": "1.0",
+    "flash_in_sequence": false
+  },
+  "test_order": [
+    {
+      "id": "1c2a79c7-1f8f-4c03-8b97-fd36a4331b70",
+      "type": "wait_info",
+      "name": "START",
+      "retry_enabled": false,
+      "max_retries": 0,
+      "retry_delay_s": 2.0
+    },
+    {
+      "id": "232c175e-5182-4198-b4be-ad42c2259696",
+      "type": "serial",
+      "name": "SARJAPORTIN LUKU",
+      "retry_enabled": false,
+      "max_retries": 0,
+      "retry_delay_s": 2.0
+    },
+    {
+      "id": "aa0398b3-b483-43d5-9e82-16a3f6ce1f8f",
+      "type": "wait_info",
+      "name": "NEXT STEP",
+      "retry_enabled": false,
+      "max_retries": 0,
+      "retry_delay_s": 2.0
+    },
+    {
+      "id": "84e4c74d-1b32-4a7b-885f-00ce1b1fd107",
+      "type": "modbus",
+      "name": "STALLGUARD CHECK",
+      "retry_enabled": true,
+      "max_retries": 3,
+      "retry_delay_s": 2.0
+    },
+    {
+      "id": "95d94612-193f-4f4d-ad3a-5bea1434f35e",
+      "type": "wait_info",
+      "name": "NEXT STEP 2",
+      "retry_enabled": false,
+      "max_retries": 0,
+      "retry_delay_s": 2.0
+    },
+    {
+      "id": "10bcf0e1-5de9-4b09-a9e0-c70c191d9e0a",
+      "type": "modbus",
+      "name": "Modbus Testi",
+      "retry_enabled": true,
+      "max_retries": 3,
+      "retry_delay_s": 2.0
+    },
+    {
+      "id": "2519aba5-c958-4dcf-9da9-d2c2b87b987a",
+      "type": "wait_info",
+      "name": "NEXT STEP 3",
+      "retry_enabled": false,
+      "max_retries": 0,
+      "retry_delay_s": 2.0
+    },
+    {
+      "id": "c58b5296-f24a-4a6e-8d97-2719d1e8ffbc",
+      "type": "daq",
+      "name": "DAQ Mittaus",
+      "retry_enabled": true,
+      "max_retries": 3,
+      "retry_delay_s": 2.0
+    }
+  ],
+  "step_specific_settings": {
+    "10bcf0e1-5de9-4b09-a9e0-c70c191d9e0a": [
+      {
+        "action": "read_holding",
+        "address": 0,
+        "count": 29,
+        "value": "N/A",
+        "expected": "Ignore"
+      },
+      {
+        "action": "wait",
+        "duration_ms": 10000,
+        "address": "N/A",
+        "value": "N/A",
+        "count": "N/A",
+        "expected": "N/A"
+      },
+      {
+        "action": "read_holding",
+        "address": 2,
+        "count": 1,
+        "value": "N/A",
+        "expected": "1100"
+      },
+      {
+        "action": "wait",
+        "duration_ms": 1000,
+        "address": "N/A",
+        "value": "N/A",
+        "count": "N/A",
+        "expected": "N/A"
+      },
+      {
+        "action": "read_holding",
+        "address": 2,
+        "count": 1,
+        "value": "N/A",
+        "expected": "1100"
+      },
+      {
+        "action": "write_register",
+        "address": 0,
+        "value": 0,
+        "count": 1,
+        "expected": "N/A"
+      },
+      {
+        "action": "wait",
+        "duration_ms": 25000,
+        "address": "N/A",
+        "value": "N/A",
+        "count": "N/A",
+        "expected": "N/A"
+      },
+      {
+        "action": "read_holding",
+        "address": 2,
+        "count": 1,
+        "value": "N/A",
+        "expected": "0"
+      },
+      {
+        "action": "write_register",
+        "address": 0,
+        "value": 50,
+        "count": 1,
+        "expected": "N/A"
+      },
+      {
+        "action": "wait",
+        "duration_ms": 12500,
+        "address": "N/A",
+        "value": "N/A",
+        "count": "N/A",
+        "expected": "N/A"
+      },
+      {
+        "action": "read_holding",
+        "address": 2,
+        "count": 1,
+        "value": "N/A",
+        "expected": "550"
+      },
+      {
+        "action": "read_holding",
+        "address": 0,
+        "count": 29,
+        "value": "N/A",
+        "expected": "Ignore"
+      }
+    ],
+    "c58b5296-f24a-4a6e-8d97-2719d1e8ffbc": {
+      "ai_channels": {
+        "ai0": {
+          "use": true,
+          "min_v": 3.0,
+          "max_v": 3.3,
+          "name": "Analogitulo 0"
+        },
+        "ai1": {
+          "use": false,
+          "min_v": -10.0,
+          "max_v": 10.0,
+          "name": "Analogitulo 1"
+        },
+        "ai2": {
+          "use": false,
+          "min_v": -10.0,
+          "max_v": 10.0,
+          "name": "Analogitulo 2"
+        },
+        "ai3": {
+          "use": false,
+          "min_v": -10.0,
+          "max_v": 10.0,
+          "name": "Analogitulo 3"
+        },
+        "ai4": {
+          "use": false,
+          "min_v": -10.0,
+          "max_v": 10.0,
+          "name": "Analogitulo 4"
+        },
+        "ai5": {
+          "use": false,
+          "min_v": -10.0,
+          "max_v": 10.0,
+          "name": "Analogitulo 5"
+        },
+        "ai6": {
+          "use": false,
+          "min_v": -10.0,
+          "max_v": 10.0,
+          "name": "Analogitulo 6"
+        },
+        "ai7": {
+          "use": false,
+          "min_v": -10.0,
+          "max_v": 10.0,
+          "name": "Analogitulo 7"
+        }
+      },
+      "ao_channels": {
+        "ao0": {
+          "use": false,
+          "output_v": 0.0,
+          "name": "Analogilähtö 0"
+        },
+        "ao1": {
+          "use": false,
+          "output_v": 0.0,
+          "name": "Analogilähtö 1"
+        }
+      },
+      "dio_lines": {
+        "P0.0": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "Ignore",
+          "name": "Digitaalilinja P0.0"
+        },
+        "P0.1": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "Ignore",
+          "name": "Digitaalilinja P0.1"
+        },
+        "P0.2": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "Ignore",
+          "name": "Digitaalilinja P0.2"
+        },
+        "P0.3": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "Ignore",
+          "name": "Digitaalilinja P0.3"
+        },
+        "P0.4": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "Ignore",
+          "name": "Digitaalilinja P0.4"
+        },
+        "P0.5": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "Ignore",
+          "name": "Digitaalilinja P0.5"
+        },
+        "P0.6": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "Ignore",
+          "name": "Digitaalilinja P0.6"
+        },
+        "P0.7": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "Ignore",
+          "name": "Digitaalilinja P0.7"
+        },
+        "P1.0": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "Ignore",
+          "name": "Digitaalilinja P1.0"
+        },
+        "P1.1": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "Ignore",
+          "name": "Digitaalilinja P1.1"
+        },
+        "P1.2": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "Ignore",
+          "name": "Digitaalilinja P1.2"
+        },
+        "P1.3": {
+          "use": false,
+          "direction": "Input",
+          "output_val": "Low",
+          "expected_input": "High",
+          "name": "3.3V"
+        }
+      }
+    },
+    "232c175e-5182-4198-b4be-ad42c2259696": {
+      "duration_s": 25.0,
+      "command": "",
+      "keyword": "Vent is ready to be used!",
+      "delimiter": " ",
+      "value_type": "Teksti",
+      "expected_value": "Vent is ready to be used!",
+      "min_value": "",
+      "max_value": "",
+      "error_strings": [],
+      "require_keyword": true,
+      "case_sensitive": true
+    },
+    "1c2a79c7-1f8f-4c03-8b97-fd36a4331b70": {
+      "message": "Odota...",
+      "wait_seconds": 5.0
+    },
+    "aa0398b3-b483-43d5-9e82-16a3f6ce1f8f": {
+      "message": "Odota...",
+      "wait_seconds": 5.0
+    },
+    "84e4c74d-1b32-4a7b-885f-00ce1b1fd107": [
+      {
+        "action": "write_register",
+        "address": 100,
+        "value": 123,
+        "count": 1,
+        "expected": "N/A"
+      },
+      {
+        "action": "wait",
+        "duration_ms": 500,
+        "address": "N/A",
+        "value": "N/A",
+        "count": "N/A",
+        "expected": "N/A"
+      },
+      {
+        "action": "read_holding",
+        "address": 100,
+        "count": 1,
+        "expected": "123",
+        "value": "N/A"
+      }
+    ],
+    "95d94612-193f-4f4d-ad3a-5bea1434f35e": {
+      "message": "Odota...",
+      "wait_seconds": 0.0
+    },
+    "2519aba5-c958-4dcf-9da9-d2c2b87b987a": {
+      "message": "Odota...",
+      "wait_seconds": 0.0
+    }
+  },
+  "device_configurations": {
+    "1": {
+      "name": "Laite 1",
+      "flash_port": "",
+      "monitor_port": "COM6",
+      "modbus_port": "COM9",
+      "modbus_slave_id": "1",
+      "tests_enabled": {
+        "1c2a79c7-1f8f-4c03-8b97-fd36a4331b70": true,
+        "232c175e-5182-4198-b4be-ad42c2259696": true,
+        "aa0398b3-b483-43d5-9e82-16a3f6ce1f8f": false,
+        "84e4c74d-1b32-4a7b-885f-00ce1b1fd107": false,
+        "95d94612-193f-4f4d-ad3a-5bea1434f35e": false,
+        "10bcf0e1-5de9-4b09-a9e0-c70c191d9e0a": false,
+        "2519aba5-c958-4dcf-9da9-d2c2b87b987a": false,
+        "c58b5296-f24a-4a6e-8d97-2719d1e8ffbc": true
+      }
+    }
+  },
+  "layout": {
+    "device_count": 1
+  }
+}

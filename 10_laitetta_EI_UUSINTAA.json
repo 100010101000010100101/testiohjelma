@@ -1,0 +1,131 @@
+{
+  "version": 3,
+  "global_settings": {
+    "bootloader_path": "C:/Users/noel/Desktop/UUSIN_testiohjelma/esp32.esp32.esp32doit-devkit-v1/KOJA_4_30_copy_20250325154254.ino.bootloader.bin",
+    "partitions_path": "C:/Users/noel/Desktop/UUSIN_testiohjelma/esp32.esp32.esp32doit-devkit-v1/KOJA_4_30_copy_20250325154254.ino.partitions.bin",
+    "app_path": "C:/Users/noel/Desktop/UUSIN_testiohjelma/esp32.esp32.esp32doit-devkit-v1/KOJA_4_30_copy_20250325154254.ino.bin",
+    "flash_baudrate": "921600",
+    "serial_baudrate": "115200",
+    "modbus_baudrate": "9600",
+    "modbus_timeout": "1.0",
+    "flash_in_sequence": false
+  },
+  "test_order": [
+    {
+      "id": "d7586395-e034-43ef-841f-88bd1326089d",
+      "type": "flash",
+      "name": "Ohjelmointi",
+      "retry_enabled": false,
+      "max_retries": 3,
+      "retry_delay_s": 2.0
+    }
+  ],
+  "step_specific_settings": {
+    "d7586395-e034-43ef-841f-88bd1326089d": {}
+  },
+  "device_configurations": {
+    "1": {
+      "name": "Laite 1",
+      "flash_port": "COM15",
+      "monitor_port": "",
+      "modbus_port": "",
+      "modbus_slave_id": "1",
+      "tests_enabled": {
+        "d7586395-e034-43ef-841f-88bd1326089d": true
+      }
+    },
+    "2": {
+      "name": "Laite 2",
+      "flash_port": "COM13",
+      "monitor_port": "",
+      "modbus_port": "",
+      "modbus_slave_id": "1",
+      "tests_enabled": {
+        "d7586395-e034-43ef-841f-88bd1326089d": true
+      }
+    },
+    "3": {
+      "name": "Laite 3",
+      "flash_port": "COM14",
+      "monitor_port": "",
+      "modbus_port": "",
+      "modbus_slave_id": "1",
+      "tests_enabled": {
+        "d7586395-e034-43ef-841f-88bd1326089d": true
+      }
+    },
+    "4": {
+      "name": "Laite 4",
+      "flash_port": "COM16",
+      "monitor_port": "",
+      "modbus_port": "",
+      "modbus_slave_id": "1",
+      "tests_enabled": {
+        "d7586395-e034-43ef-841f-88bd1326089d": true
+      }
+    },
+    "5": {
+      "name": "Laite 5",
+      "flash_port": "COM17",
+      "monitor_port": "",
+      "modbus_port": "",
+      "modbus_slave_id": "1",
+      "tests_enabled": {
+        "d7586395-e034-43ef-841f-88bd1326089d": true
+      }
+    },
+    "6": {
+      "name": "Laite 6",
+      "flash_port": "COM6",
+      "monitor_port": "",
+      "modbus_port": "",
+      "modbus_slave_id": "1",
+      "tests_enabled": {
+        "d7586395-e034-43ef-841f-88bd1326089d": true
+      }
+    },
+    "7": {
+      "name": "Laite 7",
+      "flash_port": "COM11",
+      "monitor_port": "",
+      "modbus_port": "",
+      "modbus_slave_id": "1",
+      "tests_enabled": {
+        "d7586395-e034-43ef-841f-88bd1326089d": true
+      }
+    },
+    "8": {
+      "name": "Laite 8",
+      "flash_port": "COM25",
+      "monitor_port": "",
+      "modbus_port": "",
+      "modbus_slave_id": "1",
+      "tests_enabled": {
+        "d7586395-e034-43ef-841f-88bd1326089d": true
+      }
+    },
+    "9": {
+      "name": "Laite 9",
+      "flash_port": "COM7",
+      "monitor_port": "",
+      "modbus_port": "",
+      "modbus_slave_id": "1",
+      "tests_enabled": {
+        "d7586395-e034-43ef-841f-88bd1326089d": true
+      }
+    },
+    "10": {
+      "name": "Laite 10",
+      "flash_port": "COM12",
+      "monitor_port": "",
+      "modbus_port": "",
+      "modbus_slave_id": "1",
+      "tests_enabled": {
+        "d7586395-e034-43ef-841f-88bd1326089d": true
+      }
+    }
+  },
+  "layout": {
+    "device_count": 10
+  }
+}
