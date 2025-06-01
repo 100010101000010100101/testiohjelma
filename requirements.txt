@@ -2,4 +2,5 @@ pyserial>=3.5
 esptool>=4.0
 nidaqmx>=0.6.0
 numpy>=1.20.0  # Required by nidaqmx for data handling
-
+opencv-python>=4.0
+requests>=2.20
