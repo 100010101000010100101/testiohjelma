@@ -1,5 +1,3 @@
-#RINNAKKAIN TOIMINTA TESTAAMATTA
-
 import customtkinter as ctk
 import tkinter as tk # Lisää tämä tiedoston alkuun, jos ei jo ole
 from tkinter import ttk
@@ -98,7 +96,6 @@ def build_esptool_args(port: str, baud: str, files: Dict[str, str]) -> Optional[
             FLASH_ADDR_PARTITIONS, files['partitions'],
             FLASH_ADDR_APP, files['app']]
     return args
-
 
 def run_composite_test_worker(device_index: int,
                               composite_type: str, # 'daq_and_serial' tai 'daq_and_modbus'
@@ -2421,6 +2418,533 @@ class SelectCompositeSubTypeDialog(ctk.CTkToplevel):
     def get_selection(self) -> Optional[Tuple[str, Optional[str]]]:
         return self.result
 
+class TestDesigner(ctk.CTkFrame):
+    def __init__(self, parent, app_instance):
+        super().__init__(parent)
+        self.app = app_instance
+        self.parent_app_instance = app_instance
+
+        self.time_scale = 60  # pixels per second
+        self.track_height = 45
+        self.track_padding = 7
+        self.item_padding = 4
+        self.canvas_padding_x = 40
+        self.canvas_padding_y = 40 # Space for time scale at top
+
+        self.selected_item_id = None
+        self._drag_data = {"x": 0, "y": 0, "item": None, "original_start_time_pixels": 0, "original_track":0}
+        self.selected_device_for_designer = ctk.StringVar(value="Kaikki") # Default to show all devices
+
+        self._create_widgets()
+        self.parent_app_instance.root.after(100, self.update_device_selector)
+        self.parent_app_instance.root.after(150, self.redraw_timeline)
+        self.parent_app_instance.root.after(200, self.update_device_assignment_matrix)
+
+    def _create_widgets(self):
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        # --- TOP CONTROLS (Device selection, Add step) ---
+        top_controls_frame = ctk.CTkFrame(self)
+        top_controls_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=(5,0))
+
+        # Device selector
+        ctk.CTkLabel(top_controls_frame, text="Näytä laitteen:").pack(side="left", padx=(0,5))
+        self.device_selector_button = ctk.CTkSegmentedButton(top_controls_frame,
+                                                             variable=self.selected_device_for_designer,
+                                                             command=self.on_device_selected_for_designer)
+        self.device_selector_button.pack(side="left", padx=5)
+
+        # Add new step
+        ctk.CTkLabel(top_controls_frame, text="Lisää vaihe:").pack(side="left", padx=(20,5))
+        self.new_step_type_designer_var = ctk.StringVar(value=list(AVAILABLE_TEST_TYPES.keys())[0] if AVAILABLE_TEST_TYPES else "")
+        self.new_step_type_designer_combo = ctk.CTkComboBox(top_controls_frame,
+                                                            variable=self.new_step_type_designer_var,
+                                                            values=list(AVAILABLE_TEST_TYPES.keys()),
+                                                            width=150,
+                                                            state='readonly')
+        self.new_step_type_designer_combo.pack(side="left", padx=5)
+        ctk.CTkButton(top_controls_frame, text="Lisää", width=60, command=self.add_new_step_from_designer).pack(side="left", padx=5)
+
+        # --- TIMELINE CANVAS ---
+        canvas_frame = ctk.CTkFrame(self)
+        canvas_frame.grid(row=1, column=0, sticky="nsew")
+        canvas_frame.grid_rowconfigure(0, weight=1)
+        canvas_frame.grid_columnconfigure(0, weight=1)
+
+        self.timeline_canvas = tk.Canvas(canvas_frame, bg="gray20", bd=0, highlightthickness=0)
+        self.timeline_canvas.grid(row=0, column=0, sticky="nsew")
+
+        x_scrollbar = ctk.CTkScrollbar(canvas_frame, orientation="horizontal", command=self.timeline_canvas.xview)
+        x_scrollbar.grid(row=1, column=0, sticky="ew")
+        y_scrollbar = ctk.CTkScrollbar(canvas_frame, orientation="vertical", command=self.timeline_canvas.yview)
+        y_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self.timeline_canvas.configure(xscrollcommand=x_scrollbar.set, yscrollcommand=y_scrollbar.set)
+
+        self.timeline_canvas.bind("<ButtonPress-1>", self.on_canvas_press)
+        self.timeline_canvas.bind("<B1-Motion>", self.on_canvas_drag)
+        self.timeline_canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
+
+        # --- DEVICE ASSIGNMENT MATRIX ---
+        assignment_frame = ctk.CTkFrame(self)
+        assignment_frame.grid(row=2, column=0, sticky="ew", padx=5, pady=5)
+        assignment_frame.grid_columnconfigure(0, weight=1)
+        
+        ctk.CTkLabel(assignment_frame, text="Testivaiheet ja laitteet:", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, sticky="w", padx=5, pady=(5,0))
+        
+        # Scrollable frame for the matrix
+        self.matrix_scroll_frame = ctk.CTkScrollableFrame(assignment_frame, height=200)
+        self.matrix_scroll_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=5)
+        
+        # --- BOTTOM CONTROLS ---
+        bottom_controls_frame = ctk.CTkFrame(self)
+        bottom_controls_frame.grid(row=3, column=0, sticky="ew", pady=(0,5))
+        ctk.CTkButton(bottom_controls_frame, text="Päivitä aikajana manuaalisesti", command=self.redraw_timeline).pack(side="left", padx=5)
+        ctk.CTkButton(bottom_controls_frame, text="Käynnistä rinnakkaiset testit", command=self.start_concurrent_tests, fg_color="orange").pack(side="left", padx=5)
+        ctk.CTkButton(bottom_controls_frame, text="Päivitä laitemääritykset", command=self.update_device_assignment_matrix).pack(side="left", padx=5)
+
+    def update_device_selector(self):
+        """Updates the device selector (SegmentedButton) values."""
+        device_names_for_selector = ["Kaikki"]
+        for i in range(1, self.parent_app_instance.current_device_count + 1):
+            dev_name = self.parent_app_instance.device_state.get(i, {}).get('config', {}).get('name', f"Laite {i}")
+            device_names_for_selector.append(dev_name)
+
+        current_selection = self.selected_device_for_designer.get()
+        self.device_selector_button.configure(values=device_names_for_selector)
+
+        if current_selection in device_names_for_selector:
+            self.device_selector_button.set(current_selection)
+        elif device_names_for_selector:
+            self.device_selector_button.set(device_names_for_selector[0])
+        else:
+             self.device_selector_button.set("")
+
+        self.redraw_timeline()
+
+    def on_device_selected_for_designer(self, selected_device_name: str):
+        """Called when a device is selected from the SegmentedButton."""
+        self._log_designer(f"Device selected in designer: {selected_device_name}")
+        self.selected_item_id = None
+        self.redraw_timeline()
+
+    def add_new_step_from_designer(self):
+        """Adds a new test step to the test_order list and updates the UI."""
+        step_type_to_add = self.new_step_type_designer_var.get()
+        if not step_type_to_add:
+            messagebox.showwarning("Puuttuva tieto", "Valitse lisättävän testivaiheen tyyppi.", parent=self)
+            return
+
+        new_id = str(uuid.uuid4())
+        type_count = sum(1 for step in self.parent_app_instance.test_order if step['type'] == step_type_to_add) + 1
+        default_name = f"{AVAILABLE_TEST_TYPES.get(step_type_to_add, step_type_to_add.capitalize())} {type_count}"
+
+        new_step_data = {
+            'id': new_id,
+            'type': step_type_to_add,
+            'name': default_name,
+            'retry_enabled': False,
+            'max_retries': 0,
+            'retry_delay_s': self.parent_app_instance.default_retry_delay_s,
+            'gui_track': 0,
+        }
+
+        self.parent_app_instance.test_order.append(new_step_data)
+        self.parent_app_instance._ensure_step_specific_settings()
+
+        self._log_designer(f"Added new step: '{default_name}' (Type: {step_type_to_add}, ID: {new_id})")
+        
+        self.redraw_timeline()
+        self.parent_app_instance._create_device_frames_widgets()
+        self.parent_app_instance._update_results_ui_layout()
+
+    def start_concurrent_tests(self):
+        """Start tests concurrently for enabled devices and steps."""
+        self._log_designer("Starting concurrent tests...")
+        
+        # Get all enabled device-step combinations
+        concurrent_tasks = []
+        for device_idx in range(1, self.parent_app_instance.current_device_count + 1):
+            device_state = self.parent_app_instance.device_state.get(device_idx)
+            if not device_state:
+                continue
+                
+            enabled_tests = device_state['config']['tests_enabled']
+            for step in self.parent_app_instance.test_order:
+                if enabled_tests.get(step['id'], False):
+                    concurrent_tasks.append((device_idx, step['id']))
+        
+        if not concurrent_tasks:
+            messagebox.showinfo("Ei testejä", "Ei valittuja testejä suoritettavaksi.", parent=self)
+            return
+            
+        # Start all tasks concurrently
+        for device_idx, step_id in concurrent_tasks:
+            step = next((s for s in self.parent_app_instance.test_order if s['id'] == step_id), None)
+            if step:
+                self._log_designer(f"Starting concurrent test: Device {device_idx}, Step {step['name']}")
+                # Use existing test execution logic but in concurrent mode
+                if step['type'] in ['daq_and_serial', 'daq_and_modbus']:
+                    # Use composite test worker for concurrent DAQ tests
+                    thread = threading.Thread(
+                        target=self.parent_app_instance.run_composite_test_worker,
+                        args=(device_idx, step_id),
+                        daemon=True
+                    )
+                else:
+                    # Use regular test worker
+                    thread = threading.Thread(
+                        target=self.parent_app_instance.run_test_worker,
+                        args=(device_idx, step_id),
+                        daemon=True
+                    )
+                thread.start()
+                self.parent_app_instance.active_threads[(device_idx, step_id)] = thread
+
+    def get_test_step_by_canvas_item_id(self, canvas_item_id):
+        for step in self.parent_app_instance.test_order:
+            if step.get('_canvas_item_rect_id') == canvas_item_id or \
+               step.get('_canvas_item_text_id') == canvas_item_id:
+                return step
+        return None
+
+    def on_canvas_press(self, event):
+        canvas_x = self.timeline_canvas.canvasx(event.x)
+        canvas_y = self.timeline_canvas.canvasy(event.y)
+        canvas_item_ids = self.timeline_canvas.find_overlapping(canvas_x-1, canvas_y-1, canvas_x+1, canvas_y+1)
+        clicked_test_step = None
+        if canvas_item_ids:
+            for item_id in reversed(canvas_item_ids):
+                test_step = self.get_test_step_by_canvas_item_id(item_id)
+                if test_step and self._is_step_visible_for_selected_device(test_step):
+                    clicked_test_step = test_step
+                    break
+        if clicked_test_step:
+            self.selected_item_id = clicked_test_step['id']
+            self._drag_data["item"] = clicked_test_step['id']
+            self._drag_data["x"] = canvas_x
+            self._drag_data["y"] = canvas_y
+            self._drag_data["original_start_time_pixels"] = clicked_test_step.get('gui_start_time_pixels', 0)
+            self._drag_data["original_track"] = clicked_test_step.get('gui_track', 0)
+            self.highlight_selected()
+        else:
+            self.selected_item_id = None
+            self._drag_data["item"] = None
+            self.highlight_selected()
+
+    def on_canvas_drag(self, event):
+        if self._drag_data["item"]:
+            test_step_id_dragged = self._drag_data["item"]
+            test_step = next((s for s in self.parent_app_instance.test_order if s['id'] == test_step_id_dragged), None)
+            if not test_step or not self._is_step_visible_for_selected_device(test_step):
+                return
+
+            canvas_x = self.timeline_canvas.canvasx(event.x)
+            canvas_y = self.timeline_canvas.canvasy(event.y)
+            delta_x_pixels = canvas_x - self._drag_data["x"]
+            delta_y_pixels = canvas_y - self._drag_data["y"]
+            new_start_time_pixels = self._drag_data["original_start_time_pixels"] + delta_x_pixels
+            new_start_time_pixels = max(0, new_start_time_pixels)
+            track_delta = round(delta_y_pixels / (self.track_height + self.track_padding))
+            new_track = self._drag_data["original_track"] + track_delta
+            new_track = max(0, new_track)
+
+            test_step['gui_start_time_pixels'] = new_start_time_pixels
+            test_step['gui_track'] = new_track
+
+            if '_canvas_item_rect_id' in test_step and '_canvas_item_text_id' in test_step:
+                rect_id = test_step['_canvas_item_rect_id']
+                text_id = test_step['_canvas_item_text_id']
+                duration_pixels = test_step.get('gui_duration_pixels', self.time_scale * 5)
+                new_x1_rect = self.canvas_padding_x + new_start_time_pixels
+                new_y1_rect = self.canvas_padding_y + new_track * (self.track_height + self.track_padding) + self.item_padding
+                new_x2_rect = new_x1_rect + duration_pixels
+                new_y2_rect = new_y1_rect + self.track_height - 2 * self.item_padding
+                self.timeline_canvas.coords(rect_id, new_x1_rect, new_y1_rect, new_x2_rect, new_y2_rect)
+                self.timeline_canvas.coords(text_id, new_x1_rect + 5, new_y1_rect + (self.track_height - 2 * self.item_padding) / 2)
+
+    def on_canvas_release(self, event):
+        if self._drag_data["item"]:
+            test_step_id_released = self._drag_data["item"]
+            test_step = next((s for s in self.parent_app_instance.test_order if s['id'] == test_step_id_released), None)
+            if test_step and self._is_step_visible_for_selected_device(test_step):
+                self._log_designer(f"Test '{test_step['name']}' moved: time(px)={test_step['gui_start_time_pixels']}, track={test_step['gui_track']}")
+            self._drag_data = {"x": 0, "y": 0, "item": None, "original_start_time_pixels": 0, "original_track": 0}
+            self.redraw_timeline()
+
+    def highlight_selected(self):
+        self.redraw_timeline()
+
+    def _is_step_visible_for_selected_device(self, step_data: Dict) -> bool:
+        """Checks if the given test step should be displayed for the selected device."""
+        selected_device_name_in_designer = self.selected_device_for_designer.get()
+        if selected_device_name_in_designer == "Kaikki":
+            return True
+
+        selected_device_idx = None
+        for idx, state in self.parent_app_instance.device_state.items():
+            if state['config']['name'] == selected_device_name_in_designer:
+                selected_device_idx = idx
+                break
+        if selected_device_idx is None:
+            return False
+
+        return self.parent_app_instance.device_state[selected_device_idx]['config']['tests_enabled'].get(step_data['id'], False)
+
+    def redraw_timeline(self):
+        self.timeline_canvas.delete("all")
+        self.prepare_test_order_for_gui()
+
+        visible_steps = []
+        selected_device_name = self.selected_device_for_designer.get()
+
+        if selected_device_name == "Kaikki":
+            visible_steps = self.parent_app_instance.test_order
+        else:
+            target_device_idx = None
+            for idx, state_data in self.parent_app_instance.device_state.items():
+                if state_data['config']['name'] == selected_device_name:
+                    target_device_idx = idx
+                    break
+            if target_device_idx is not None:
+                for step in self.parent_app_instance.test_order:
+                    if self.parent_app_instance.device_state[target_device_idx]['config']['tests_enabled'].get(step['id'], False):
+                        visible_steps.append(step)
+            else:
+                 self._log_designer(f"Warning: Selected device '{selected_device_name}' not found, showing empty timeline.")
+
+        max_tracks = 0
+        total_duration_pixels = 0
+        if visible_steps:
+            for step in visible_steps:
+                max_tracks = max(max_tracks, step.get('gui_track', 0) + 1)
+                total_duration_pixels = max(total_duration_pixels, step.get('gui_start_time_pixels', 0) + step.get('gui_duration_pixels', 0))
+        else:
+            max_tracks = 1
+            total_duration_pixels = self.time_scale * 30
+
+        canvas_content_width = self.canvas_padding_x * 2 + total_duration_pixels
+        canvas_content_height = self.canvas_padding_y * 2 + max_tracks * (self.track_height + self.track_padding)
+        self.timeline_canvas.config(scrollregion=(0, 0, canvas_content_width, canvas_content_height))
+
+        for i in range(max_tracks):
+            y1 = self.canvas_padding_y + i * (self.track_height + self.track_padding)
+            y2 = y1 + self.track_height
+            self.timeline_canvas.create_rectangle(self.canvas_padding_x, y1, canvas_content_width - self.canvas_padding_x, y2, fill="gray25", outline="gray30", tags="track_bg")
+            self.timeline_canvas.create_text(self.canvas_padding_x / 2, y1 + self.track_height / 2, text=f"{i}", fill="white", anchor="e", tags="track_label")
+
+        num_seconds_to_draw = int(total_duration_pixels / self.time_scale) + 2
+        for sec in range(num_seconds_to_draw):
+            x = self.canvas_padding_x + sec * self.time_scale
+            self.timeline_canvas.create_line(x, self.canvas_padding_y / 2, x, canvas_content_height - self.canvas_padding_y / 2, fill="gray40", tags="time_tick")
+            self.timeline_canvas.create_text(x, self.canvas_padding_y / 2 - 5, text=str(sec), fill="white", anchor="s", tags="time_label")
+
+        for step in visible_steps:
+            start_pixels = step.get('gui_start_time_pixels', 0)
+            duration_pixels = step.get('gui_duration_pixels', self.time_scale * 2)
+            track = step.get('gui_track', 0)
+            x1 = self.canvas_padding_x + start_pixels
+            y1 = self.canvas_padding_y + track * (self.track_height + self.track_padding) + self.item_padding
+            x2 = x1 + duration_pixels
+            y2 = y1 + self.track_height - 2 * self.item_padding
+            step_color = self.get_color_for_test_type(step['type'])
+            outline_color = "yellow" if self.selected_item_id == step['id'] else "white"
+            line_width = 2 if self.selected_item_id == step['id'] else 1
+            rect_id = self.timeline_canvas.create_rectangle(x1, y1, x2, y2, fill=step_color, outline=outline_color, width=line_width, tags=("test_step_rect", step['id']))
+            text_content = f"{step.get('name', step['type'])}"
+            if duration_pixels < 30 :
+                 text_content = text_content[:5] + "..." if len(text_content) > 5 else text_content
+            elif duration_pixels < 60:
+                 text_content = text_content[:10] + "..." if len(text_content) > 10 else text_content
+            text_id = self.timeline_canvas.create_text(x1 + 5, y1 + (self.track_height - 2 * self.item_padding) / 2, text=text_content, anchor="w", fill="black", tags=("test_step_text", step['id']))
+            step['_canvas_item_rect_id'] = rect_id
+            step['_canvas_item_text_id'] = text_id
+
+    def prepare_test_order_for_gui(self):
+        default_duration_seconds = 5
+        default_duration_pixels = default_duration_seconds * self.time_scale
+        max_time_per_track_for_selected_device = {}
+
+        selected_device_name = self.selected_device_for_designer.get()
+        target_device_idx_for_placement = None
+
+        if selected_device_name != "Kaikki":
+            for idx, state_data in self.parent_app_instance.device_state.items():
+                if state_data['config']['name'] == selected_device_name:
+                    target_device_idx_for_placement = idx
+                    break
+
+        for i, step in enumerate(self.parent_app_instance.test_order):
+            step.setdefault('gui_track', 0)
+            is_visible_for_current_device = True
+            if target_device_idx_for_placement is not None:
+                is_visible_for_current_device = self.parent_app_instance.device_state[target_device_idx_for_placement]['config']['tests_enabled'].get(step['id'], False)
+
+            if not isinstance(step.get('gui_duration_pixels'), (int, float)) or step.get('gui_duration_pixels',0) <=0 :
+                duration_s_from_settings = None
+                step_settings = self.parent_app_instance.step_specific_settings.get(step['id'])
+                if step_settings:
+                    if step['type'] == 'wait_info': duration_s_from_settings = step_settings.get('wait_seconds')
+                    elif step['type'] == 'serial': duration_s_from_settings = step_settings.get('duration_s')
+                if duration_s_from_settings is not None:
+                    step['gui_duration_pixels'] = max(self.time_scale * 0.5, float(duration_s_from_settings) * self.time_scale)
+                else:
+                    step['gui_duration_pixels'] = default_duration_pixels
+            step['gui_duration_pixels'] = float(step['gui_duration_pixels'])
+
+            track = step['gui_track']
+            if not isinstance(step.get('gui_start_time_pixels'), (int, float)):
+                if is_visible_for_current_device:
+                    last_end_time_on_track = max_time_per_track_for_selected_device.get(track, 0.0)
+                    step['gui_start_time_pixels'] = last_end_time_on_track
+                    if last_end_time_on_track > 0.0:
+                        step['gui_start_time_pixels'] += self.time_scale / 10.0
+                else:
+                    step['gui_start_time_pixels'] = 0.0
+
+            step['gui_start_time_pixels'] = float(step['gui_start_time_pixels'])
+
+            if is_visible_for_current_device:
+                current_step_end_time = step['gui_start_time_pixels'] + step['gui_duration_pixels']
+                if current_step_end_time > max_time_per_track_for_selected_device.get(track, 0.0):
+                    max_time_per_track_for_selected_device[track] = current_step_end_time
+
+    def get_color_for_test_type(self, test_type: str) -> str:
+        colors = {'flash': "#FFB300", 'serial': "#03A9F4", 'daq': "#4CAF50", 'modbus': "#9C27B0", 'wait_info': "#795548", 'daq_and_serial': "#FF9800", 'daq_and_modbus': "#E91E63", 'default': "#607D8B"}
+        return colors.get(test_type, colors['default'])
+
+    def update_timeline_from_app_data(self):
+        self.update_device_selector()
+        self.redraw_timeline()
+
+    def update_device_assignment_matrix(self):
+        """Creates/updates the device assignment matrix showing which test steps are enabled for which devices."""
+        # Clear existing matrix
+        for widget in self.matrix_scroll_frame.winfo_children():
+            widget.destroy()
+            
+        if not self.parent_app_instance.test_order:
+            ctk.CTkLabel(self.matrix_scroll_frame, text="Ei testivaiheita määritelty", 
+                        text_color="gray").grid(row=0, column=0, padx=5, pady=5)
+            return
+            
+        # Create header row
+        ctk.CTkLabel(self.matrix_scroll_frame, text="Testivaihe", 
+                    font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        
+        # Device headers
+        device_columns = {}
+        col_idx = 1
+        for device_idx in range(1, self.parent_app_instance.current_device_count + 1):
+            device_name = self.parent_app_instance.device_state.get(device_idx, {}).get('config', {}).get('name', f"Laite {device_idx}")
+            ctk.CTkLabel(self.matrix_scroll_frame, text=device_name, 
+                        font=ctk.CTkFont(weight="bold")).grid(row=0, column=col_idx, padx=5, pady=2)
+            device_columns[device_idx] = col_idx
+            col_idx += 1
+            
+        # Add "All Devices" column
+        ctk.CTkLabel(self.matrix_scroll_frame, text="Kaikki laitteet", 
+                    font=ctk.CTkFont(weight="bold"), text_color="orange").grid(row=0, column=col_idx, padx=5, pady=2)
+        all_devices_col = col_idx
+        
+        # Create matrix rows for each test step
+        for row_idx, step in enumerate(self.parent_app_instance.test_order, start=1):
+            # Test step name and type
+            step_label = f"{step['name']} ({step['type']})"
+            step_color = self.get_color_for_test_type(step['type'])
+            
+            label_frame = ctk.CTkFrame(self.matrix_scroll_frame, fg_color=step_color, corner_radius=3)
+            label_frame.grid(row=row_idx, column=0, padx=5, pady=2, sticky="ew")
+            ctk.CTkLabel(label_frame, text=step_label, text_color="black", 
+                        font=ctk.CTkFont(size=11)).pack(padx=5, pady=2)
+            
+            # Checkboxes for each device
+            for device_idx in range(1, self.parent_app_instance.current_device_count + 1):
+                col = device_columns[device_idx]
+                
+                # Get current state
+                device_state = self.parent_app_instance.device_state.get(device_idx, {})
+                tests_enabled = device_state.get('config', {}).get('tests_enabled', {})
+                is_enabled = tests_enabled.get(step['id'], False)
+                
+                # Create checkbox
+                checkbox_var = ctk.BooleanVar(value=is_enabled)
+                checkbox = ctk.CTkCheckBox(self.matrix_scroll_frame, text="", variable=checkbox_var,
+                                         command=lambda d=device_idx, s=step['id'], v=checkbox_var: self._toggle_test_for_device(d, s, v))
+                checkbox.grid(row=row_idx, column=col, padx=5, pady=2)
+                
+            # "All Devices" toggle button
+            all_enabled = all(self.parent_app_instance.device_state.get(d, {}).get('config', {}).get('tests_enabled', {}).get(step['id'], False) 
+                             for d in range(1, self.parent_app_instance.current_device_count + 1))
+            
+            toggle_button = ctk.CTkButton(self.matrix_scroll_frame, text="Kaikki" if not all_enabled else "Ei mitään", 
+                                        width=80, height=25,
+                                        command=lambda s=step['id'], enabled=all_enabled: self._toggle_test_for_all_devices(s, not enabled))
+            toggle_button.grid(row=row_idx, column=all_devices_col, padx=5, pady=2)
+            
+        # Add summary row
+        summary_row = len(self.parent_app_instance.test_order) + 2
+        ctk.CTkLabel(self.matrix_scroll_frame, text="Yhteenveto:", 
+                    font=ctk.CTkFont(weight="bold")).grid(row=summary_row, column=0, padx=5, pady=(10,2), sticky="w")
+        
+        for device_idx in range(1, self.parent_app_instance.current_device_count + 1):
+            col = device_columns[device_idx]
+            device_state = self.parent_app_instance.device_state.get(device_idx, {})
+            tests_enabled = device_state.get('config', {}).get('tests_enabled', {})
+            enabled_count = sum(1 for step in self.parent_app_instance.test_order if tests_enabled.get(step['id'], False))
+            total_count = len(self.parent_app_instance.test_order)
+            
+            summary_text = f"{enabled_count}/{total_count}"
+            summary_color = "green" if enabled_count > 0 else "gray"
+            ctk.CTkLabel(self.matrix_scroll_frame, text=summary_text, 
+                        text_color=summary_color, font=ctk.CTkFont(weight="bold")).grid(row=summary_row, column=col, padx=5, pady=2)
+    
+    def _toggle_test_for_device(self, device_idx: int, step_id: str, checkbox_var: ctk.BooleanVar):
+        """Toggle a specific test step for a specific device."""
+        is_enabled = checkbox_var.get()
+        
+        # Update device state
+        if device_idx not in self.parent_app_instance.device_state:
+            self.parent_app_instance.device_state[device_idx] = self.parent_app_instance._create_default_device_state(device_idx)
+            
+        self.parent_app_instance.device_state[device_idx]['config']['tests_enabled'][step_id] = is_enabled
+        
+        step_name = next((s['name'] for s in self.parent_app_instance.test_order if s['id'] == step_id), step_id)
+        device_name = self.parent_app_instance.device_state[device_idx]['config']['name']
+        
+        status = "käytössä" if is_enabled else "pois käytöstä"
+        self._log_designer(f"Testivaihe '{step_name}' {status} laitteelle {device_name}")
+        
+        # Update timeline and UI
+        self.redraw_timeline()
+        self.parent_app_instance._create_device_frames_widgets()
+        
+        # Update the matrix to reflect changes
+        self.parent_app_instance.root.after(100, self.update_device_assignment_matrix)
+        
+    def _toggle_test_for_all_devices(self, step_id: str, enable: bool):
+        """Toggle a specific test step for all devices."""
+        step_name = next((s['name'] for s in self.parent_app_instance.test_order if s['id'] == step_id), step_id)
+        
+        for device_idx in range(1, self.parent_app_instance.current_device_count + 1):
+            if device_idx not in self.parent_app_instance.device_state:
+                self.parent_app_instance.device_state[device_idx] = self.parent_app_instance._create_default_device_state(device_idx)
+                
+            self.parent_app_instance.device_state[device_idx]['config']['tests_enabled'][step_id] = enable
+            
+        status = "käytössä kaikille" if enable else "pois käytöstä kaikille"
+        self._log_designer(f"Testivaihe '{step_name}' {status} laitteille")
+        
+        # Update timeline and UI
+        self.redraw_timeline()
+        self.parent_app_instance._create_device_frames_widgets()
+        
+        # Update the matrix to reflect changes
+        self.update_device_assignment_matrix()
+
+    def _log_designer(self, message: str):
+        print(f"TestDesigner: {message}")
 
 class TestiOhjelmaApp:
     def __init__(self, root):
@@ -2504,7 +3028,6 @@ class TestiOhjelmaApp:
             })
         return final_order
 
-
     def _ensure_test_order_attributes(self):
         for step in self.test_order:
             step.setdefault('retry_enabled', True)
@@ -2557,8 +3080,6 @@ class TestiOhjelmaApp:
             'runtime': {'sequence_running':False,'current_stage_test_step_id':None,'steps_status':steps_status_dict,'step_attempts':step_attempts_dict,'final_result':None,'last_status_msg':"Valmis",'start_time':None,'end_time':None},
             'busy_flags': {'flash_port':False,'monitor_port':False,'modbus_port':False,'daq':False}
         }
-
-
 
     def _get_default_daq_settings(self) -> Dict:
         s={"ai_channels":{},"ao_channels":{},"dio_lines":{}}
@@ -2659,7 +3180,16 @@ class TestiOhjelmaApp:
         run_mode_tab_frame.grid_columnconfigure(0, weight=1) # Keskittää ja antaa leveyttä
         run_mode_tab_frame.grid_rowconfigure(0, weight=0)
         run_mode_tab_frame.grid_rowconfigure(1, weight=0)
-        run_mode_tab_frame.grid_rowconfigure(2, weight=0) 
+        run_mode_tab_frame.grid_rowconfigure(2, weight=0)
+        
+        # --- Testisuunnittelu Välilehti ---
+        designer_tab_frame = left_tabview.add("Testisuunnittelu")
+        designer_tab_frame.grid_columnconfigure(0, weight=1)
+        designer_tab_frame.grid_rowconfigure(0, weight=1)
+        
+        # Create TestDesigner instance
+        self.test_designer_ui = TestDesigner(designer_tab_frame, self)
+        self.test_designer_ui.grid(row=0, column=0, sticky="nsew") 
 
         scroll_content_frame = ctk.CTkScrollableFrame(config_tab_base_frame, label_text=None, fg_color="transparent")
         scroll_content_frame.grid(row=0, column=0, sticky="nsew") # Scrollable frame täyttää config_tab_base_frame:n
@@ -2857,8 +3387,6 @@ class TestiOhjelmaApp:
                     cb.configure(state="disabled"); var.set(False)
                 cb.pack(side="left", padx=5, pady=0)
 
-
-
     def _create_results_panel(self):
         parent = self.results_outer_frame # results_outer_frame on jo konfiguroitu venymään
         results_title_frame = ctk.CTkFrame(parent);
@@ -2884,7 +3412,6 @@ class TestiOhjelmaApp:
         self.log_tabview.grid(row=1, column=0, sticky="nsew", padx=0, pady=0) # Grid ja sticky
         self.root.after(150, self._update_log_tabs)
 
-    #ALKUPERÄINEN
     def _update_log_tabs(self):
 
         if not hasattr(self, 'log_tabview') or not self.log_tabview.winfo_exists(): # Turvallisempi tarkistus
@@ -2976,7 +3503,6 @@ class TestiOhjelmaApp:
                 self.test_results_ui.update_device_names(device_names_map)
             self._update_log_tabs()
 
-
     def _update_device_names_in_ui(self): 
          device_names_map = {}
          for i in range(1, self.current_device_count + 1):
@@ -3000,7 +3526,6 @@ class TestiOhjelmaApp:
 
     def _browse_file(self, string_var: ctk.StringVar): 
         filename = filedialog.askopenfilename(parent=self.root);_=[string_var.set(filename)] if filename else None
-
 
     def open_wait_info_config(self):
        selected_step_id = self._select_test_step_for_config('wait_info', "Odotus/Info Asetukset")
@@ -3136,7 +3661,6 @@ class TestiOhjelmaApp:
                 self.step_specific_settings[step_id_to_configure] = updated_settings
                 print(f"Itsenäisen Sarjatestin '{step_name_for_log}' asetukset päivitetty.")
 
-
     def open_modbus_config(self):
         if not PYMODBUS_AVAILABLE: return
         selection = self._select_test_step_for_config_extended('modbus', "Modbus Testin")
@@ -3189,7 +3713,6 @@ class TestiOhjelmaApp:
         self._create_device_frames_widgets(); self._update_results_ui_layout(); self._update_log_tabs()
         if hasattr(self,'scrollable_devices_frame') and self.scrollable_devices_frame._parent_canvas: 
             self.root.after(50, lambda: self.scrollable_devices_frame._parent_canvas.yview_moveto(1.0))
-
 
     def remove_device(self): 
         if self.current_device_count <= 0 : return 
@@ -3261,7 +3784,6 @@ class TestiOhjelmaApp:
                 else:
                     cb.set(ports_for_combobox[0])
             print(f"Ports refreshed for device {device_idx_to_refresh}.")
-
 
     def refresh_ports(self):
         """Päivitä saatavilla olevat sarjaportit kaikissa porttien valintalaatikoissa."""
@@ -3875,31 +4397,6 @@ class TestiOhjelmaApp:
             
             self.root.after(50, lambda idx=device_idx: self._start_next_test_step(idx))
 
-    def _log_messageVANHA(self, device_idx: int, message: str, error: bool = False):
-        ts = time.strftime("%H:%M:%S")
-        pfx = "ERROR: " if error else ""
-        log_line = f"{ts} {pfx}{message}"
-
-        # Lisää loki-widgettiin GUI:ssa
-        if device_idx in self.log_text_widgets:
-            lw = self.log_text_widgets[device_idx]
-            try:
-                current_state = lw.cget("state")
-                lw.configure(state='normal')
-                lw.insert("end", log_line + "\n")
-                lw.see("end")
-                lw.configure(state=current_state)
-            except Exception as e:
-                print(f"Error logging to GUI D{device_idx}: {e}")
-        else:
-            print(f"Log Widget Missing D{device_idx}: {log_line}")
-
-        # Lisää lokipuskuriin automaattista tallennusta varten
-        if device_idx not in self.device_log_buffer:
-            self.device_log_buffer[device_idx] = []
-        self.device_log_buffer[device_idx].append((ts, f"{pfx}{message}"))
-
-    #UUSI
     def _log_message(self, device_idx: int, message: str, error: bool = False):
         ts = time.strftime("%H:%M:%S")
         pfx = "ERROR: " if error else ""
@@ -4084,50 +4581,6 @@ class TestiOhjelmaApp:
                 return False # Vähintään yksi laite vielä testaa
         return True # Kaikki laitteet ovat lopettaneet
    
-    #EI TOIMI
-    def _update_log_tabsUUSI(self): # Poistetaan CSV-tallennuspainike välilehdiltä
-        if not hasattr(self, 'log_tabview') or self.log_tabview._segmented_button is None: return
-        
-        active_tab_name = None
-        try:
-            if self.log_tabview.get(): active_tab_name = self.log_tabview.get()
-        except: pass
-
-        current_tab_names = list(self.log_tabview._tab_dict.keys())
-        for tab_name in current_tab_names:
-            try: self.log_tabview.delete(tab_name)
-            except Exception as e: print(f"Varoitus: Ei voitu poistaa logitabiä '{tab_name}': {e}")
-        self.log_text_widgets.clear()
-
-        new_tab_names = []
-        for i in range(self.current_device_count):
-            device_idx = i + 1
-            dev_name = self.device_state.get(device_idx, {}).get('config',{}).get('name', f"Laite {device_idx}")
-            unique_name = dev_name
-            # ... (uniikin nimen generointi tarvittaessa) ...
-            new_tab_names.append(unique_name)
-
-            try:
-                self.log_tabview.add(unique_name)
-                tab_frame = self.log_tabview.tab(unique_name)
-                if tab_frame:
-                    tab_frame.grid_rowconfigure(0, weight=1) # Tekstikenttä täyttää koko tilan
-                    tab_frame.grid_columnconfigure(0, weight=1)
-
-                    text_widget = ctk.CTkTextbox(tab_frame, wrap="word", height=10, font=("Courier New", 9))
-                    text_widget.grid(row=0, column=0, sticky="nsew", padx=5, pady=5) # Vain tekstikenttä
-                    text_widget.configure(state='disabled')
-                    self.log_text_widgets[device_idx] = text_widget
-            except Exception as e:
-                print(f"Virhe logitabin luonnissa '{unique_name}': {e}")
-
-        if active_tab_name and active_tab_name in self.log_tabview._name_list:
-            try: self.log_tabview.set(active_tab_name)
-            except: pass
-        elif new_tab_names:
-            try: self.log_tabview.set(new_tab_names[0])
-            except: pass
-
 def main():
     root = ctk.CTk()
     app = TestiOhjelmaApp(root)
