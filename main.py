@@ -16,6 +16,8 @@ import copy # Needed for deep copies
 import uuid # For unique test step IDs
 import traceback # For detailed error logging
 import csv # LISÄTTY CSV-IMPORT
+import cv2 # For image operations
+import google.generativeai as genai # For Gemini API
 
 # --- Nidaqmx import and check ---
 try:
@@ -75,11 +77,356 @@ AVAILABLE_TEST_TYPES = {
     'modbus': 'Modbus',
     'wait_info': 'Odotus/Info',
     'daq_and_serial': 'DAQ ja Sarjatesti (Rinnakkain)', # UUSI
-    'daq_and_modbus': 'DAQ ja Modbus (Rinnakkain)'    # UUSI
+    'daq_and_modbus': 'DAQ ja Modbus (Rinnakkain)',    # UUSI
+    'ai_optical_inspection': 'AI Optinen Tarkastus'
 }
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue")
+
+# --- Image Processing Functions ---
+def capture_image_from_webcam(camera_index: int = 0) -> Optional[np.ndarray]:
+    """Captures a single frame from the specified webcam.
+
+    Args:
+        camera_index: The index of the camera (default is 0).
+
+    Returns:
+        The captured frame as a NumPy array, or None if capture failed.
+    """
+    cap = None
+    try:
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            print(f"[ERROR] Webcam {camera_index}: Cannot open camera.")
+            return None
+        ret, frame = cap.read()
+        if not ret:
+            print(f"[ERROR] Webcam {camera_index}: Cannot read frame.")
+            return None
+        return frame
+    except Exception as e:
+        print(f"[ERROR] Webcam {camera_index}: Exception during capture: {e}")
+        return None
+    finally:
+        if cap is not None and cap.isOpened():
+            cap.release()
+
+def apply_roi(image: np.ndarray, x: int, y: int, w: int, h: int) -> Optional[np.ndarray]:
+    """Applies a Region of Interest (ROI) to the image.
+
+    Args:
+        image: The input image (NumPy array).
+        x: The x-coordinate of the top-left corner of the ROI.
+        y: The y-coordinate of the top-left corner of the ROI.
+        w: The width of the ROI.
+        h: The height of the ROI.
+
+    Returns:
+        The cropped image (ROI) as a NumPy array, or None if ROI is invalid.
+    """
+    if image is None:
+        print("[ERROR] ROI: Input image is None.")
+        return None
+    img_h, img_w = image.shape[:2]
+    if not (0 <= x < img_w and 0 <= y < img_h and w > 0 and h > 0 and x + w <= img_w and y + h <= img_h):
+        print(f"[ERROR] ROI: Invalid ROI coordinates {{'x':{x},'y':{y},'w':{w},'h':{h}}} for image size {{'width':{img_w},'height':{img_h}}}.")
+        return None
+    return image[y:y+h, x:x+w]
+
+def adjust_brightness(image: np.ndarray, factor: float) -> Optional[np.ndarray]:
+    """Adjusts the brightness of the image.
+
+    Args:
+        image: The input image (NumPy array).
+        factor: Brightness adjustment factor.
+                > 1 increases brightness, < 1 decreases. 0-1 is typical for reduction.
+
+    Returns:
+        The brightness-adjusted image as a NumPy array.
+    """
+    if image is None:
+        print("[ERROR] Brightness: Input image is None.")
+        return None
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+
+    # Multiply V channel by factor, ensuring values stay within 0-255
+    v_adjusted = np.clip(v * factor, 0, 255).astype(np.uint8)
+
+    final_hsv = cv2.merge((h, s, v_adjusted))
+    bright_adjusted_image = cv2.cvtColor(final_hsv, cv2.COLOR_HSV2BGR)
+    return bright_adjusted_image
+
+def normalize_image(image: np.ndarray) -> Optional[np.ndarray]:
+    """Normalizes the image pixel values to the range 0-1. (Actually 0-255 for display, or can be scaled)
+    This example performs histogram equalization on the V channel for contrast enhancement.
+
+    Args:
+        image: The input image (NumPy array).
+
+    Returns:
+        The normalized/enhanced image as a NumPy array.
+    """
+    if image is None:
+        print("[ERROR] Normalize: Input image is None.")
+        return None
+    # Convert to HSV
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    # Apply histogram equalization to the V channel
+    v_equalized = cv2.equalizeHist(v)
+    # Merge the channels back
+    final_hsv = cv2.merge((h, s, v_equalized))
+    # Convert back to BGR
+    normalized_image = cv2.cvtColor(final_hsv, cv2.COLOR_HSV2BGR)
+    return normalized_image
+# --- End of Image Processing Functions ---
+
+# --- Gemini API Interaction Functions ---
+GEMINI_API_CONFIGURED = False
+
+def configure_gemini_api():
+    """Configures the Google Generative AI client using an API key from env variable.
+
+    Returns:
+        bool: True if configuration was successful, False otherwise.
+    """
+    global GEMINI_API_CONFIGURED
+    if GEMINI_API_CONFIGURED:
+        return True
+    try:
+        api_key = os.environ.get('GOOGLE_API_KEY')
+        if not api_key:
+            print("[ERROR] Gemini API: GOOGLE_API_KEY environment variable not set.")
+            # Potentially log to GUI queue if called from a worker
+            return False
+        genai.configure(api_key=api_key)
+        GEMINI_API_CONFIGURED = True
+        print("[INFO] Gemini API: Successfully configured.")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Gemini API: Failed to configure: {e}")
+        GEMINI_API_CONFIGURED = False
+        return False
+
+def generate_text_from_image_and_prompt(image_data: bytes, prompt_text: str, mime_type: str = 'image/jpeg') -> Optional[str]:
+    """
+    Sends an image (as bytes) and a text prompt to the Gemini Pro Vision model
+    and returns the generated text.
+
+    Args:
+        image_data: Image data in bytes.
+        prompt_text: The text prompt to send with the image.
+        mime_type: The MIME type of the image (e.g., 'image/jpeg', 'image/png').
+
+    Returns:
+        The generated text response from Gemini, or None if an error occurs.
+    """
+    if not GEMINI_API_CONFIGURED:
+        if not configure_gemini_api(): # Try to configure if not already
+            return "[ERROR] Gemini API not configured. Please set GOOGLE_API_KEY."
+
+    try:
+        # Ensure the model name is up-to-date with latest Gemini offerings for multimodal input.
+        # 'gemini-pro-vision' is a common one, but this might change.
+        # For models released after SDK version used, this might need updating or might not support direct image bytes.
+        # The SDK usually prefers `Part.from_data(mime_type=..., data=...)` for images.
+
+        model = genai.GenerativeModel('gemini-pro-vision') # Or 'gemini-1.5-flash-latest' / 'gemini-1.5-pro-latest' if available and preferred
+
+        image_part = {
+            'mime_type': mime_type,
+            'data': image_data
+        }
+
+        response = model.generate_content([prompt_text, image_part]) # Order might matter: prompt then image, or image then prompt. Check SDK docs.
+
+        # Depending on the response structure, you might need to access response.text or iterate parts.
+        # For gemini-pro-vision, response.text should typically work for simple text responses.
+        if hasattr(response, 'text'):
+            return response.text
+        else:
+            # Fallback for more complex responses (e.g., multi-part, or if .text is not populated directly)
+            # This part might need adjustment based on the exact Gemini model and SDK version.
+            full_response_text = []
+            for part in response.parts:
+                if hasattr(part, 'text'):
+                    full_response_text.append(part.text)
+            if full_response_text:
+                return "\\n".join(full_response_text)
+            else:
+                print(f"[WARNING] Gemini API: Response received, but no text part found directly. Response: {response}")
+                return None
+
+    except Exception as e:
+        print(f"[ERROR] Gemini API: Error during content generation: {e}")
+        # More specific error handling could be added here (e.g., for QuotaExceeded, APINotEnabled)
+        return f"[ERROR] Gemini API call failed: {e}"
+# --- End of Gemini API Interaction Functions ---
+
+def run_ai_optical_inspection_worker(device_index: int, settings: Dict, stop_event: threading.Event, app_gui_queue: queue.Queue):
+    """
+    Worker function for the AI Optical Inspection test.
+    Captures an image, processes it, sends to Gemini, and checks response.
+    """
+    success = False
+    error_occurred = False
+    log_messages = []
+
+    def q(type_str: str, data: Any = None, color: str = 'black'):
+        app_gui_queue.put({'type': type_str, 'device_index': device_index, 'data': data, 'status_color': color})
+
+    def log_output(message: str, is_error: bool = False):
+        log_messages.append(message)
+        prefix = "[ERROR] " if is_error else "[INFO] "
+        q('output', f"{prefix}{message}")
+
+    log_output("Aloitetaan AI Optinen Tarkastus...")
+    q('status', "AI Tarkastus...", 'orange')
+    q('clear_output') # Clear previous output for this device's log
+
+    try:
+        # 1. Get settings
+        roi_x = settings.get('roi_x', 0)
+        roi_y = settings.get('roi_y', 0)
+        roi_w = settings.get('roi_w', 0)
+        roi_h = settings.get('roi_h', 0)
+        brightness_factor = settings.get('brightness', 1.0)
+        use_normalization = settings.get('normalize', False)
+        gemini_question = settings.get('gemini_question', "Describe this image.")
+        pass_keywords_str = settings.get('pass_keywords', "")
+        pass_keywords = [kw.strip().lower() for kw in pass_keywords_str.split(',') if kw.strip()]
+
+        log_output(f"Asetukset: ROI=({roi_x},{roi_y},{roi_w},{roi_h}), Brightness={brightness_factor}, Normalize={use_normalization}")
+        log_output(f"Gemini Kysymys: {gemini_question}")
+        log_output(f"Avainsanat läpäisyyn: {pass_keywords}")
+
+        if stop_event.is_set(): raise Exception("Testi keskeytetty ennen kameran käyttöä.")
+
+        # 2. Capture image
+        log_output("Otetaan kuva webkamerasta...")
+        image = capture_image_from_webcam() # Assumes global function from previous step
+        if image is None:
+            log_output("Kuvanotto epäonnistui.", is_error=True)
+            raise Exception("Webcam image capture failed.")
+
+        log_output("Kuva otettu onnistuneesti.")
+        # For debugging, one might save the image here: cv2.imwrite(f"debug_d{device_index}_original.jpg", image)
+
+        if stop_event.is_set(): raise Exception("Testi keskeytetty kuvanoton jälkeen.")
+
+        # 3. Process image: ROI, Brightness, Normalization
+        processed_image = image
+        if roi_w > 0 and roi_h > 0: # Apply ROI only if width and height are positive
+            log_output(f"Sovelletaan ROI: x={roi_x}, y={roi_y}, w={roi_w}, h={roi_h}")
+            roi_image = apply_roi(processed_image, roi_x, roi_y, roi_w, roi_h) # Assumes global
+            if roi_image is None:
+                log_output("ROI-määritys virheellinen tai kuvan ulkopuolella.", is_error=True)
+                # Continue with original image or fail? For now, continue with original.
+                # Consider making this a hard fail if ROI is critical.
+            else:
+                processed_image = roi_image
+                log_output("ROI sovellettu.")
+                # cv2.imwrite(f"debug_d{device_index}_roi.jpg", processed_image)
+
+
+        if abs(brightness_factor - 1.0) > 0.01: # Apply only if factor is meaningfully different from 1
+            log_output(f"Säädetään kirkkautta (kerroin: {brightness_factor:.2f})...")
+            processed_image = adjust_brightness(processed_image, brightness_factor) # Assumes global
+            if processed_image is None: # Should not happen if input is valid
+                 log_output("Kirkkauden säätö epäonnistui.", is_error=True)
+                 raise Exception("Brightness adjustment failed unexpectedly.")
+            log_output("Kirkkaus säädetty.")
+            # cv2.imwrite(f"debug_d{device_index}_brightness.jpg", processed_image)
+
+
+        if use_normalization:
+            log_output("Normalisoidaan kuvaa...")
+            processed_image = normalize_image(processed_image) # Assumes global
+            if processed_image is None: # Should not happen
+                log_output("Kuvan normalisointi epäonnistui.", is_error=True)
+                raise Exception("Image normalization failed unexpectedly.")
+            log_output("Kuva normalisoitu.")
+            # cv2.imwrite(f"debug_d{device_index}_normalized.jpg", processed_image)
+
+        if stop_event.is_set(): raise Exception("Testi keskeytetty kuvankäsittelyn jälkeen.")
+
+        # 4. Encode image to bytes for Gemini
+        log_output("Koodataan kuvaa Geminiä varten...")
+        is_success, im_buf_arr = cv2.imencode(".jpg", processed_image)
+        if not is_success:
+            log_output("Kuvan koodaus JPG-muotoon epäonnistui.", is_error=True)
+            raise Exception("Failed to encode image to JPG for Gemini.")
+        image_bytes = im_buf_arr.tobytes()
+        log_output("Kuva koodattu onnistuneesti.")
+
+        # 5. Send to Gemini API
+        log_output(f"Lähetetään kuva ja kysymys Gemini API:lle: '{gemini_question}'")
+
+        # Ensure API is configured (can be called multiple times, checks global flag)
+        if not GEMINI_API_CONFIGURED: # GEMINI_API_CONFIGURED is global
+            if not configure_gemini_api(): # configure_gemini_api is global
+                log_output("Gemini API:n konfigurointi epäonnistui. Tarkista GOOGLE_API_KEY.", is_error=True)
+                raise Exception("Gemini API configuration failed.")
+
+        gemini_response = generate_text_from_image_and_prompt(image_bytes, gemini_question) # Assumes global
+
+        if gemini_response is None:
+            log_output("Gemini API: Ei vastausta tai virhe haettaessa vastausta.", is_error=True)
+            raise Exception("Gemini API did not return a response.")
+
+        log_output(f"Gemini API Vastaus:\n------\n{gemini_response}\n------")
+
+        if gemini_response.startswith("[ERROR]"):
+            log_output(f"Gemini API palautti virheen: {gemini_response}", is_error=True)
+            error_occurred = True # Mark as error, not just fail
+            success = False
+        elif not pass_keywords:
+            log_output("Varoitus: Ei avainsanoja määritelty läpäisyyn. Merkitään testivaihe onnistuneeksi, jos API-kutsu onnistui.")
+            success = True # If no keywords, API success means test success
+        else:
+            response_lower = gemini_response.lower()
+            found_all_keywords = True
+            for kw in pass_keywords:
+                if kw not in response_lower:
+                    found_all_keywords = False
+                    log_output(f"Avainsanaa '{kw}' EI löytynyt vastauksesta.", is_error=True)
+                    break
+            if found_all_keywords:
+                log_output(f"Kaikki avainsanat ({pass_keywords_str}) löytyivät vastauksesta. Testi LÄPÄISTY.")
+                success = True
+            else:
+                log_output(f"Kaikkia avainsanoja ({pass_keywords_str}) EI löytynyt. Testi EPÄONNISTUI.")
+                success = False
+
+        if stop_event.is_set(): raise Exception("Testi keskeytetty Gemini-vastauksen jälkeen.")
+
+    except Exception as e:
+        log_output(f"Kriittinen virhe AI Optisessa Tarkastuksessa: {e}", is_error=True)
+        # log_output(traceback.format_exc()) # Could be too verbose for GUI log
+        print(f"[CRITICAL AI WORKER D{device_index}] {e}\n{traceback.format_exc()}") # Print full to console
+        success = False
+        if not error_occurred: # If not already marked as an API error
+             error_occurred = True # General exception implies an error in test execution
+
+    finally:
+        if stop_event.is_set():
+            q('status', 'AI Tarkastus Keskeyt.', 'orange')
+            success = False # Ensure failure on stop
+            log_output("AI Optinen Tarkastus keskeytetty.")
+        elif error_occurred: # An error in the test logic or API call itself
+            q('status', 'AI Tarkastus VIRHE', 'red')
+            # success is already False
+        elif success:
+            q('status', 'AI Tarkastus OK', 'green')
+        else: # Normal failure (e.g., keywords not found)
+            q('status', 'AI Tarkastus Epäonnistui', 'red')
+
+        # Send all buffered log messages at once if needed, or rely on individual q('output') calls
+        # For now, individual calls are fine.
+
+        q('ai_optical_inspection_done', {'success': success, 'error': error_occurred})
 
 
 def list_serial_ports() -> List[str]:
@@ -672,7 +1019,7 @@ def run_background_daq_worker(settings: Dict, control_queue: queue.Queue, stop_e
                                                 if chan.name == nidaqmx_line_name_to_set:
                                                     target_channel_index = idx
                                                     break
-                                            
+
                                             if target_channel_index != -1:
                                                 # Luodaan data-array, joka on oikean kokoinen
                                                 current_do_states = task_do.read() # Lue nykyiset tilat ensin!
@@ -1222,6 +1569,148 @@ def run_wait_info_worker(device_index: int, settings: Dict, stop_event: threadin
 
 
 # === Configuration Windows (Unchanged) ===
+
+class AIOpticalInspectionConfigWindow(ctk.CTkToplevel):
+    def __init__(self, parent, current_settings: Dict):
+        super().__init__(parent)
+        self.title("AI Optisen Tarkastuksen Asetukset")
+        self.parent = parent
+        self.grab_set()
+        self.transient(parent)
+        # Ensure all expected keys exist in current_settings or use defaults
+        default_vals = {
+            "roi_x": 0, "roi_y": 0, "roi_w": 0, "roi_h": 0,
+            "brightness": 1.0, "normalize": False,
+            "gemini_question": "Is there a missing component on this PCB?",
+            "pass_keywords": "no missing component,all components present"
+        }
+        self.settings = {key: default_vals[key] for key in default_vals} # Initialize with all defaults
+        if isinstance(current_settings, dict): # If current_settings is a dict, update from it
+            for key in default_vals: # Iterate through expected keys
+                 if key in current_settings: # Only update if key exists in current_settings
+                    self.settings[key] = current_settings[key]
+
+        self.result_settings = None
+
+        # Variables for UI elements
+        self.roi_x_var = ctk.StringVar(value=str(self.settings.get("roi_x", 0)))
+        self.roi_y_var = ctk.StringVar(value=str(self.settings.get("roi_y", 0)))
+        self.roi_w_var = ctk.StringVar(value=str(self.settings.get("roi_w", 0)))
+        self.roi_h_var = ctk.StringVar(value=str(self.settings.get("roi_h", 0)))
+        self.brightness_var = ctk.StringVar(value=str(self.settings.get("brightness", 1.0)))
+        self.normalize_var = ctk.BooleanVar(value=self.settings.get("normalize", False))
+        self.gemini_question_var = ctk.StringVar(value=self.settings.get("gemini_question", "Is there a missing component on this PCB?"))
+        self.pass_keywords_var = ctk.StringVar(value=self.settings.get("pass_keywords", "no missing component,all components present"))
+
+        self._create_widgets()
+        # self._load_settings_to_gui() # Already done by initializing StringVars
+
+        self.geometry(f"+{parent.winfo_rootx()+90}+{parent.winfo_rooty()+90}")
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.wait_window(self)
+
+    def _create_widgets(self):
+        main_scroll_frame = ctk.CTkScrollableFrame(self, label_text=None)
+        main_scroll_frame.pack(fill="both", expand=True)
+
+        main_frame = ctk.CTkFrame(main_scroll_frame, corner_radius=0) # Use main_scroll_frame as parent
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # ROI Settings
+        roi_container = ctk.CTkFrame(main_frame)
+        roi_container.pack(fill="x", pady=5)
+        ctk.CTkLabel(roi_container, text="Alueen Määritys (ROI)", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=5, pady=2)
+        roi_frame = ctk.CTkFrame(roi_container)
+        roi_frame.pack(fill="x", padx=5, pady=2)
+        roi_frame.grid_columnconfigure((1,3), weight=1) # Allow entries to expand a bit
+
+        ctk.CTkLabel(roi_frame, text="ROI X:").grid(row=0, column=0, padx=5, pady=3, sticky="w")
+        ctk.CTkEntry(roi_frame, textvariable=self.roi_x_var, width=80).grid(row=0, column=1, padx=5, pady=3, sticky="ew")
+        ctk.CTkLabel(roi_frame, text="ROI Y:").grid(row=0, column=2, padx=5, pady=3, sticky="w")
+        ctk.CTkEntry(roi_frame, textvariable=self.roi_y_var, width=80).grid(row=0, column=3, padx=5, pady=3, sticky="ew")
+        ctk.CTkLabel(roi_frame, text="ROI Leveys (W):").grid(row=1, column=0, padx=5, pady=3, sticky="w")
+        ctk.CTkEntry(roi_frame, textvariable=self.roi_w_var, width=80).grid(row=1, column=1, padx=5, pady=3, sticky="ew")
+        ctk.CTkLabel(roi_frame, text="ROI Korkeus (H):").grid(row=1, column=2, padx=5, pady=3, sticky="w")
+        ctk.CTkEntry(roi_frame, textvariable=self.roi_h_var, width=80).grid(row=1, column=3, padx=5, pady=3, sticky="ew")
+        ctk.CTkLabel(roi_frame, text="(0,0,0,0 = koko kuva)", font=ctk.CTkFont(size=10)).grid(row=2, column=0, columnspan=4, padx=5, pady=(0,5), sticky="w")
+
+
+        # Image Processing Settings
+        proc_container = ctk.CTkFrame(main_frame)
+        proc_container.pack(fill="x", pady=5)
+        ctk.CTkLabel(proc_container, text="Kuvankäsittely", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=5, pady=2)
+        proc_frame = ctk.CTkFrame(proc_container)
+        proc_frame.pack(fill="x", padx=5, pady=2)
+
+        ctk.CTkLabel(proc_frame, text="Kirkkauskerroin:").grid(row=0, column=0, padx=5, pady=3, sticky="w")
+        ctk.CTkEntry(proc_frame, textvariable=self.brightness_var, width=80).grid(row=0, column=1, padx=5, pady=3, sticky="w")
+        ctk.CTkLabel(proc_frame, text="(1.0 = ei muutosta)", font=ctk.CTkFont(size=10)).grid(row=0, column=2, padx=5, pady=3, sticky="w")
+
+        ctk.CTkCheckBox(proc_frame, text="Käytä normalisointia (kontrastin parannus)", variable=self.normalize_var).grid(row=1, column=0, columnspan=3, padx=5, pady=5, sticky="w")
+
+        # Gemini API Settings
+        gemini_container = ctk.CTkFrame(main_frame)
+        gemini_container.pack(fill="x", pady=5)
+        ctk.CTkLabel(gemini_container, text="Gemini API", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=5, pady=2)
+        gemini_frame = ctk.CTkFrame(gemini_container)
+        gemini_frame.pack(fill="x", padx=5, pady=2)
+
+        ctk.CTkLabel(gemini_frame, text="Kysymys Geminille:").pack(anchor="w", padx=5)
+        self.gemini_question_entry = ctk.CTkTextbox(gemini_frame, height=60, wrap="word")
+        self.gemini_question_entry.pack(fill="x", padx=5, pady=(0,5))
+        self.gemini_question_entry.insert("1.0", self.gemini_question_var.get())
+
+        ctk.CTkLabel(gemini_frame, text="Avainsanat läpäisyyn (pilkulla eroteltu):").pack(anchor="w", padx=5)
+        ctk.CTkEntry(gemini_frame, textvariable=self.pass_keywords_var).pack(fill="x", padx=5, pady=(0,5))
+
+        ctk.CTkLabel(gemini_frame, text="Huom: Gemini API vaatii GOOGLE_API_KEY ympäristömuuttujan.",
+                     font=ctk.CTkFont(size=10), text_color="gray").pack(anchor="w", padx=5, pady=(5,0))
+
+        # OK/Cancel Buttons
+        button_frame = ctk.CTkFrame(main_frame, fg_color="transparent") # Use main_frame for buttons
+        button_frame.pack(fill="x", pady=(20,5))
+        ctk.CTkButton(button_frame, text="Peruuta", command=self._on_cancel).pack(side="right", padx=5)
+        ctk.CTkButton(button_frame, text="OK", command=self._on_ok, fg_color="green").pack(side="right", padx=5)
+
+    def _update_settings_from_gui(self) -> bool:
+        try:
+            self.settings["roi_x"] = int(self.roi_x_var.get())
+            self.settings["roi_y"] = int(self.roi_y_var.get())
+            self.settings["roi_w"] = int(self.roi_w_var.get())
+            self.settings["roi_h"] = int(self.roi_h_var.get())
+            self.settings["brightness"] = float(self.brightness_var.get())
+            # Basic validation
+            if self.settings["roi_w"] < 0 or self.settings["roi_h"] < 0:
+                raise ValueError("ROI leveys ja korkeus eivät voi olla negatiivisia.")
+            if self.settings["brightness"] <= 0:
+                raise ValueError("Kirkkauskertoimen on oltava positiivinen.")
+
+        except ValueError as e:
+            messagebox.showerror("Virheellinen Syöte", f"Tarkista numeeriset arvot (ROI, Kirkkaus): {e}", parent=self)
+            return False
+
+        self.settings["normalize"] = self.normalize_var.get()
+        self.settings["gemini_question"] = self.gemini_question_entry.get("1.0", "end-1c").strip()
+        self.settings["pass_keywords"] = self.pass_keywords_var.get().strip()
+
+        if not self.settings["gemini_question"]:
+            messagebox.showwarning("Puuttuva Kysymys", "Syötä kysymys Gemini API:lle.", parent=self)
+            return False
+        # Pass keywords can be empty if user doesn't want to check them
+        return True
+
+    def _on_ok(self):
+        if self._update_settings_from_gui():
+            self.result_settings = self.settings
+            self.destroy()
+
+    def _on_cancel(self):
+        self.result_settings = None
+        self.destroy()
+
+    def get_settings(self) -> Optional[Dict]:
+        return self.result_settings
+
 class DAQConfigWindow(ctk.CTkToplevel):
      def __init__(self, parent, current_settings: Dict):
         super().__init__(parent)
@@ -3136,7 +3625,7 @@ class TestDesigner(ctk.CTkFrame):
                 if test_step and self._is_step_visible_for_selected_device(test_step):
                     clicked_test_step = test_step
                     break
-        
+
         if clicked_test_step: # Vain jos normaali testivaihe
             self.selected_item_id = clicked_test_step['id']
             self._drag_data["item"] = clicked_test_step['id']
@@ -3386,7 +3875,13 @@ class TestDesigner(ctk.CTkFrame):
                     max_time_per_track_for_selected_device[logical_track] = current_step_end_time
 
     def get_color_for_test_type(self, test_type: str) -> str:
-        colors = {'flash': "#FFB300", 'serial': "#03A9F4", 'daq': "#4CAF50", 'modbus': "#9C27B0", 'wait_info': "#795548", 'daq_and_serial': "#FF9800", 'daq_and_modbus': "#E91E63", 'default': "#607D8B"}
+        colors = {
+            'flash': "#FFB300", 'serial': "#03A9F4", 'daq': "#4CAF50",
+            'modbus': "#9C27B0", 'wait_info': "#795548",
+            'daq_and_serial': "#FF9800", 'daq_and_modbus': "#E91E63",
+            'ai_optical_inspection': "#26A69A",  # Teal color for AI Optical Inspection
+            'default': "#607D8B"
+        }
         return colors.get(test_type, colors['default'])
 
     def update_timeline_from_app_data(self):
@@ -3589,14 +4084,14 @@ class TestDesigner(ctk.CTkFrame):
 
             if updated_settings is not None:
                 self.parent_app_instance.background_daq_settings = updated_settings
-                self.parent_app_instance.log_message("Tausta-DAQ asetukset päivitetty config-ikkunasta.")
+                self.parent_app_instance._log_message(0, "Tausta-DAQ asetukset päivitetty config-ikkunasta.")
                 self.redraw_timeline() # Päivitä aikajana näyttämään mahdollisesti uusi nimi
             else: # Käyttäjä peruutti
-                self.parent_app_instance.log_message("Tausta-DAQ asetusten muokkaus peruutettu.")
+                self.parent_app_instance._log_message(0, "Tausta-DAQ asetusten muokkaus peruutettu.")
 
 
         except Exception as e:
-            self.parent_app_instance.log_message(f"Virhe tausta-DAQ asetusten avaamisessa: {e}", error=True)
+            self.parent_app_instance._log_message(0, f"Virhe tausta-DAQ asetusten avaamisessa: {e}", error=True)
             messagebox.showerror("Virhe", f"Tausta-DAQ asetusten avaaminen epäonnistui:\n{e}", parent=self.parent_app_instance.root)
             traceback.print_exc()
 
@@ -3624,7 +4119,7 @@ class TestDesigner(ctk.CTkFrame):
                     if test_step and self._is_step_visible_for_selected_device(test_step):
                         clicked_test_step = test_step
                         break
-        
+
         if clicked_test_step:
             step_id = clicked_test_step['id']
             step_type = clicked_test_step['type']
@@ -3665,9 +4160,11 @@ class TestDesigner(ctk.CTkFrame):
                 self.parent_app_instance.open_modbus_config_for_step(step_id, composite_parent_type_for_settings)
             elif target_config_type_for_settings == 'wait_info':
                 self.parent_app_instance.open_wait_info_config_for_step(step_id)
+            elif target_config_type_for_settings == 'ai_optical_inspection':
+                self.parent_app_instance.open_ai_optical_inspection_config(step_id)
             else:
                 self._log_designer(f"Ei konfigurointi-ikkunaa tyypille '{target_config_type_for_settings}' (alkuperäinen: '{step_type}')")
-        
+
         elif not is_background_daq_click: # Jos ei klikattu mitään tunnistettua
             self.selected_item_id = None
             self.highlight_selected()
@@ -3783,6 +4280,14 @@ class TestiOhjelmaApp:
                 'daq_settings': copy.deepcopy(self._daq_settings_template),
                 'modbus_settings': copy.deepcopy(self._modbus_sequence_template) # Käytä sequencea täälläkin
             }
+            elif step_type == 'ai_optical_inspection':
+                return { # Default settings for AI Optical Inspection
+                    'roi_x': 0, 'roi_y': 0, 'roi_w': 0, 'roi_h': 0, # 0,0,0,0 means full image
+                    'brightness': 1.0, # No change
+                    'normalize': False,
+                    'gemini_question': "Is the object in the center of the image correctly assembled?",
+                    'pass_keywords': "yes,correctly assembled" # Comma-separated
+                }
         return {}
 
     def _ensure_step_specific_settings(self):
@@ -3843,7 +4348,7 @@ class TestiOhjelmaApp:
                 "P0.3": {"use": False, "direction": "input", "name": "Status Input 2"}
             }
         }
-  
+
     def open_daq_config_for_step(self, step_id_to_configure: str, composite_parent_type: Optional[str]):
         if not NIDAQMX_AVAILABLE:
             messagebox.showerror("Virhe", "NI-DAQmx kirjastoa ei löydy.", parent=self.root)
@@ -4033,11 +4538,13 @@ class TestiOhjelmaApp:
         settings_frame.pack(fill="x", padx=5, pady=(0,5))
         sf_inner = ctk.CTkFrame(settings_frame)
         sf_inner.pack(fill="x", padx=5, pady=5)
-        sf_inner.grid_columnconfigure((0,1,2,3), weight=1)
+        sf_inner.grid_columnconfigure((0,1,2,3,4), weight=1) # Added one more column for AI
         ctk.CTkButton(sf_inner, text="Sarjatesti...", command=self.open_serial_config).grid(row=0, column=0, padx=2, pady=2, sticky="ew")
         ctk.CTkButton(sf_inner, text="DAQ...", command=self.open_daq_config, state="normal" if NIDAQMX_AVAILABLE else "disabled").grid(row=0, column=1, padx=2, pady=2, sticky="ew")
         ctk.CTkButton(sf_inner, text="Modbus...", command=self.open_modbus_config, state="normal" if PYMODBUS_AVAILABLE else "disabled").grid(row=0, column=2, padx=2, pady=2, sticky="ew")
         ctk.CTkButton(sf_inner, text="Odotus/Info...", command=self.open_wait_info_config).grid(row=0, column=3, padx=2, pady=2, sticky="ew")
+        ctk.CTkButton(sf_inner, text="AI Optinen...", command=self.open_ai_optical_inspection_config).grid(row=0, column=4, padx=2, pady=2, sticky="ew")
+
 
         test_order_container = ctk.CTkFrame(test_specific_actions_container)
         test_order_container.pack(fill="x", expand=False, padx=0, pady=5)
@@ -4502,7 +5009,28 @@ class TestiOhjelmaApp:
        if not selected_step_id:
            return
        self.open_wait_info_config_for_step(selected_step_id) # composite_parent_type on None
-  
+
+    def open_ai_optical_inspection_config(self, step_id_to_configure: Optional[str] = None): # Add optional step_id_to_configure
+        if step_id_to_configure is None: # If not called with a specific ID (e.g. from TestDesigner double-click)
+            selection = self._select_test_step_for_config_extended('ai_optical_inspection', "AI Optisen Tarkastuksen")
+            if not selection: return
+            step_id_to_configure, _, _ = selection # composite_parent_type is None for this type
+
+        current_settings = self.step_specific_settings.get(step_id_to_configure, self._get_default_settings_for_step_type('ai_optical_inspection'))
+
+        config_window = AIOpticalInspectionConfigWindow(self.root, current_settings)
+        updated_settings = config_window.get_settings()
+
+        if updated_settings is not None:
+            self.step_specific_settings[step_id_to_configure] = updated_settings
+            step_name = next((s['name'] for s in self.test_order if s['id'] == step_id_to_configure), "AI Optinen Tarkastus")
+            self._log_message(0, f"'{step_name}' asetukset päivitetty.")
+            # Optionally, redraw timeline if settings could affect duration/display significantly
+            # if hasattr(self, 'test_designer_ui'):
+            #     self.test_designer_ui.redraw_timeline()
+        else:
+            self._log_message(0, f"AI Optisen Tarkastuksen '{step_id_to_configure}' asetusten muokkaus peruutettu.")
+
     def open_test_order_config(self):
         # Varmista, että test_orderissa on jo oletus retry-avaimet ennen ikkunan avaamista
         self._ensure_test_order_attributes()
@@ -4899,6 +5427,10 @@ class TestiOhjelmaApp:
                         self._check_daq_queue # Funktio check queue
                         )
                 target_func = run_composite_test_worker
+            elif current_test_type == 'ai_optical_inspection':
+                target_func = run_ai_optical_inspection_worker
+                args = (device_idx, copy.deepcopy(step_settings), stop_event, self.gui_queue)
+                # No specific busy flags for this test type for now, relies on webcam availability.
             else:
                 raise ValueError(f"Tuntematon testityyppi: {current_test_type}")
 
@@ -4989,8 +5521,12 @@ class TestiOhjelmaApp:
                     # Composite test is considered one step. Worker handles sub-step logic.
                     pass # No special handling here, logic below applies to the composite step as a whole
 
+                result = False # Default to False
+                if isinstance(data, dict): # For messages that send a dict (like AI optical inspection)
+                    result = data.get('success', False)
+                elif data is not None: # For messages that send a simple boolean or can be evaluated
+                    result = bool(data)
 
-                result = bool(data) # Workerin palauttama tulos
 
                 if not active_step_id_for_done_msg:
                     self._log_message(device_idx, f"KRIITTINEN: Vastaanotettu {msg_type}, mutta ei aktiivista vaiheen ID:tä. Data: {data}. Ohitetaan.", error=True)
@@ -5015,6 +5551,7 @@ class TestiOhjelmaApp:
                 # DAQ-lukko vapautetaan erikseen release_daq_lock-viestillä workerista
                 # For composite tests, the specific worker should handle its own busy flags before sending _done.
                 # The DAQ lock is handled by release_daq_lock.
+                # ai_optical_inspection_done is now handled by the generic _done logic
 
                 thread_key = (device_idx, active_step_id_for_done_msg)
                 if thread_key in self.active_threads: del self.active_threads[thread_key]
@@ -5142,7 +5679,8 @@ class TestiOhjelmaApp:
                     self.test_designer_ui.bg_daq_stop_button.configure(state="disabled")
                     self.test_designer_ui.bg_daq_config_button.configure(state="normal")
                 self._log_message(0, f"Tausta-DAQ pysäytetty ({data.get('device')}).")
-
+            # No specific handling for 'ai_optical_inspection_done' error field yet in this generic handler,
+            # but the 'success' boolean from data is used for result determination.
 
             else:
                 print(f"Varoitus: Tuntematon GUI-viesti: {msg_type} laitteelle {device_idx}")
